@@ -80,6 +80,7 @@ void Propagator::propagate_and_clone(std::shared_ptr<State> state, double timest
   // Loop through all IMU messages, and use them to move the state forward in time
   // This uses the zero'th order quat, and then constant acceleration discrete
   if (prop_data.size() > 1) {
+    RCLCPP_INFO(rclcpp::get_logger("Propagator"), "\n\n\n\nPropagating state from %.4f to %.4f", time0, time1);
     for (size_t i = 0; i < prop_data.size() - 1; i++) {
 
       // Get the next state Jacobian and noise Jacobian for this IMU reading
@@ -446,6 +447,10 @@ void Propagator::predict_and_compute(std::shared_ptr<State> state, const ov_core
     predict_mean_discrete(state, dt, w_hat_avg, a_hat_avg, new_q, new_v, new_p);
   }
 
+  RCLCPP_INFO(rclcpp::get_logger("Propagator"), "has_odom: %d %d", data_minus.has_odom, data_plus.has_odom);
+  if (data_minus.has_odom && data_plus.has_odom)
+    predict_mean_odom(state, data_minus, data_plus, new_q, new_v, new_p);
+
   // Allocate state transition and continuous-time noise Jacobian
   F = Eigen::MatrixXd::Zero(state->imu_intrinsic_size() + 15, state->imu_intrinsic_size() + 15);
   Eigen::MatrixXd G = Eigen::MatrixXd::Zero(state->imu_intrinsic_size() + 15, 12);
@@ -472,11 +477,65 @@ void Propagator::predict_and_compute(std::shared_ptr<State> state, const ov_core
 
   // Now replace imu estimate and fej with propagated values
   Eigen::Matrix<double, 16, 1> imu_x = state->_imu->value();
+  RCLCPP_INFO_STREAM(rclcpp::get_logger("Propagator"), "Prev IMU state:\n" << state->_imu->value().transpose());
   imu_x.block(0, 0, 4, 1) = new_q;
   imu_x.block(4, 0, 3, 1) = new_p;
   imu_x.block(7, 0, 3, 1) = new_v;
   state->_imu->set_value(imu_x);
   state->_imu->set_fej(imu_x);
+  RCLCPP_INFO_STREAM(rclcpp::get_logger("Propagator"), "Propagated IMU state:\n" << state->_imu->value().transpose());
+}
+
+void Propagator::predict_mean_odom(std::shared_ptr<State> state, const ov_core::ImuData &data_minus, const ov_core::ImuData &data_plus,
+                       Eigen::Vector4d &new_q, Eigen::Vector3d &new_v, Eigen::Vector3d &new_p) {
+  Eigen::Isometry3d odom_minus(Eigen::Translation3d(data_minus.pm) * Eigen::Quaterniond(data_minus.qm));
+  Eigen::Isometry3d odom_plus(Eigen::Translation3d(data_plus.pm) * Eigen::Quaterniond(data_plus.qm));
+  RCLCPP_INFO(rclcpp::get_logger("Propagator"), "quat: %lf %lf %lf w: %lf",
+              Eigen::Quaterniond(odom_plus.rotation()).x(), Eigen::Quaterniond(odom_plus.rotation()).y(),
+              Eigen::Quaterniond(odom_plus.rotation()).z(), Eigen::Quaterniond(odom_plus.rotation()).w());
+  Eigen::Isometry3d odom_diff = odom_minus.inverse() * odom_plus;
+  RCLCPP_INFO_STREAM(rclcpp::get_logger("Propagator"), "odom_diff:\n" << odom_diff.matrix());
+  Eigen::Isometry3d odom_state(Eigen::Translation3d(state->_imu->pos()) * Eigen::Quaterniond(state->_imu->quat()));  // quat_2_Rot(state->_imu->quat())));
+  RCLCPP_INFO(rclcpp::get_logger("Propagator"), "state quat: %lf %lf %lf w: %lf",
+              Eigen::Quaterniond(odom_state.rotation()).x(), Eigen::Quaterniond(odom_state.rotation()).y(),
+              Eigen::Quaterniond(odom_state.rotation()).z(), Eigen::Quaterniond(odom_state.rotation()).w());
+  Eigen::Isometry3d odom_new = odom_state * odom_diff;
+
+  // force inclination to be the same as in odom_plus to avoid error accumulation
+  Eigen::Matrix3d new_yaw = odom_new.linear();
+  new_yaw.block<3, 1>(0, 2) = Eigen::Vector3d::UnitZ();
+  new_yaw.block<3, 1>(0, 0) = new_yaw.block<3, 1>(0, 1).cross(new_yaw.block<3, 1>(0, 2)).normalized();
+  new_yaw.block<3, 1>(0, 1) = new_yaw.block<3, 1>(0, 2).cross(new_yaw.block<3, 1>(0, 0)).normalized();
+  Eigen::Matrix3d odom_yaw = odom_plus.linear();
+  odom_yaw.block<3, 1>(0, 2) = Eigen::Vector3d::UnitZ();
+  odom_yaw.block<3, 1>(0, 0) = odom_yaw.block<3, 1>(0, 1).cross(odom_yaw.block<3, 1>(0, 2)).normalized();
+  odom_yaw.block<3, 1>(0, 1) = odom_yaw.block<3, 1>(0, 2).cross(odom_yaw.block<3, 1>(0, 0)).normalized();
+  odom_new.linear() = new_yaw * odom_yaw.transpose() * odom_plus.linear();
+
+  RCLCPP_INFO(rclcpp::get_logger("Propagator"), "new quat: %lf %lf %lf w: %lf",
+              Eigen::Quaterniond(odom_new.rotation()).x(), Eigen::Quaterniond(odom_new.rotation()).y(),
+              Eigen::Quaterniond(odom_new.rotation()).z(), Eigen::Quaterniond(odom_new.rotation()).w());
+
+  const size_t max_features = 25; // if we have at least this many features don't use odometry at all
+  double fraction = std::max(0.0, (0.10/-max_features)*(state->_features_SLAM.size()-max_features));
+
+  Eigen::Quaterniond imu_q(new_q); 
+  Eigen::Quaterniond odom_q(odom_new.rotation());
+  Eigen::Quaterniond interpolated_q = imu_q.slerp(fraction, odom_q); 
+
+  Eigen::Vector3d imu_p = new_p; 
+  Eigen::Vector3d odom_p = odom_new.translation();
+  Eigen::Vector3d interpolated_p = (1.0 - fraction) * imu_p + fraction * odom_p;
+
+  Eigen::Vector3d imu_v = new_v;
+  Eigen::Vector3d odom_v = odom_new.rotation() * data_plus.vm; 
+  Eigen::Vector3d interpolated_v = (1.0 - fraction) * imu_v + fraction * odom_v;
+
+  new_q = interpolated_q.coeffs();
+  new_p = interpolated_p;
+  new_v = interpolated_v;
+
+  RCLCPP_INFO_STREAM(rclcpp::get_logger("Propagator"), "vm: " << data_plus.vm.transpose() << ", new_v: " << new_v.transpose());
 }
 
 void Propagator::predict_mean_discrete(std::shared_ptr<State> state, double dt, const Eigen::Vector3d &w_hat, const Eigen::Vector3d &a_hat,

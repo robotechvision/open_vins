@@ -110,7 +110,7 @@ public:
   void visualize_final();
 
   /// Callback for inertial information
-  void callback_inertial(const sensor_msgs::msg::Imu::SharedPtr msg);
+  void callback_inertial(const sensor_msgs::msg::Imu::ConstSharedPtr &imu_msg, const nav_msgs::msg::Odometry::ConstSharedPtr &odom_msg);
 
   /// Callback for monocular cameras information
   void callback_monocular(const sensor_msgs::msg::Image::SharedPtr msg0, int cam_id0);
@@ -156,7 +156,11 @@ protected:
   std::shared_ptr<tf2_ros::TransformBroadcaster> mTfBr;
 
   // Our subscribers and camera synchronizers
-  rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr sub_imu;
+  typedef message_filters::sync_policies::ApproximateTime<sensor_msgs::msg::Imu, nav_msgs::msg::Odometry> ImuOdomSyncPolicy;
+  message_filters::Subscriber<sensor_msgs::msg::Imu> sub_imu;
+  message_filters::Subscriber<nav_msgs::msg::Odometry> sub_odom;
+  message_filters::Synchronizer<ImuOdomSyncPolicy> sync_imu_odom;
+  // rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr sub_imu;
   std::vector<rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr> subs_cam;
   typedef message_filters::sync_policies::ApproximateTime<sensor_msgs::msg::Image, sensor_msgs::msg::Image> sync_pol;
   std::vector<std::shared_ptr<message_filters::Synchronizer<sync_pol>>> sync_cam;

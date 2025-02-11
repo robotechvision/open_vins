@@ -358,6 +358,9 @@ protected:
   void compute_Xi_sum(std::shared_ptr<State> state, double dt, const Eigen::Vector3d &w_hat, const Eigen::Vector3d &a_hat,
                       Eigen::Matrix<double, 3, 18> &Xi_sum);
 
+  void predict_mean_odom(std::shared_ptr<State> state, const ov_core::ImuData &data_minus, const ov_core::ImuData &data_plus,
+                         Eigen::Vector4d &new_q, Eigen::Vector3d &new_v, Eigen::Vector3d &new_p);
+
   /**
    * @brief Analytically predict IMU mean based on ACI^2
    *

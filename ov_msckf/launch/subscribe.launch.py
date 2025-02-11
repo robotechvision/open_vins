@@ -44,7 +44,35 @@ launch_args = [
         name="save_total_state",
         default_value="false",
         description="record the total state with calibration and features to a txt file",
-    )
+    ),
+    # Node(
+    #     name="static_tf",
+    #     package="tf2_ros",
+    #     executable="static_transform_publisher",
+    #     arguments=["0", "0", "0", "0", "0", "0", "1", "imu", "base_link"],
+    # ),
+    # Node(
+    #     name="static_tf_odom",
+    #     package="tf2_ros",
+    #     executable="static_transform_publisher",
+    #     arguments=["55.407", "132.132", "0", "0", "0", "-0.39266153253489", "0.919683054572254", "global", "odom"],
+    #     # arguments=["-55.407", "-132.132", "0", "0", "0", "0.919683054572254", "0.39266153253489", "global", "odom"],
+    # ),
+
+    Node(
+        name="static_tf",
+        package="tf2_ros",
+        executable="static_transform_publisher",
+        arguments=["0", "0", "0", "0", "0", "0", "1", "imu", "base_footprint"],
+    ),
+    Node(
+        name="static_tf_odom",
+        package="tf2_ros",
+        executable="static_transform_publisher",
+        arguments=["0", "0", "0", "0", "0", "0", "1", "global", "odom"],
+        # arguments=["-55.407", "-132.132", "0", "0", "0", "0.919683054572254", "0.39266153253489", "global", "odom"],
+    ),
+
 ]
 
 def launch_setup(context):
@@ -86,7 +114,10 @@ def launch_setup(context):
             {"max_cameras": LaunchConfiguration("max_cameras")},
             {"save_total_state": LaunchConfiguration("save_total_state")},
             {"config_path": config_path},
+            {"use_sim_time": True},
+            # {"topic_odom": ""},
         ],
+        # prefix=["gnome-terminal -- gdb -ex run --args"],
     )
 
     node2 = Node(
@@ -102,6 +133,7 @@ def launch_setup(context):
             "--log-level",
             "warn",
             ],
+        parameters=[{"use_sim_time": True}],
     )
 
     return [node1, node2]

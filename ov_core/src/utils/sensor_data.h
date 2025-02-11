@@ -42,6 +42,11 @@ struct ImuData {
   /// Accelerometer reading, linear acceleration (m/s^2)
   Eigen::Matrix<double, 3, 1> am;
 
+  bool has_odom = false;
+  Eigen::Matrix<double, 3, 1> pm;
+  Eigen::Matrix<double, 4, 1> qm;
+  Eigen::Matrix<double, 3, 1> vm;
+
   /// Sort function to allow for using of STL containers
   bool operator<(const ImuData &other) const { return timestamp < other.timestamp; }
 };

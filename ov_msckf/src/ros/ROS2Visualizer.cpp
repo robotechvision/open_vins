@@ -36,7 +36,7 @@ using namespace ov_type;
 using namespace ov_msckf;
 
 ROS2Visualizer::ROS2Visualizer(std::shared_ptr<rclcpp::Node> node, std::shared_ptr<VioManager> app, std::shared_ptr<Simulator> sim)
-    : _node(node), _app(app), _sim(sim), thread_update_running(false) {
+    : _node(node), _app(app), _sim(sim), thread_update_running(false), sync_imu_odom(ImuOdomSyncPolicy(100)) {
 
   // Setup our transform broadcaster
   mTfBr = std::make_shared<tf2_ros::TransformBroadcaster>(node);
@@ -166,12 +166,26 @@ void ROS2Visualizer::setup_subscribers(std::shared_ptr<ov_core::YamlParser> pars
   assert(parser != nullptr);
 
   // Create imu subscriber (handle legacy ros param info)
-  std::string topic_imu;
-  _node->declare_parameter<std::string>("topic_imu", "/imu0");
+  std::string topic_imu, topic_odom;
+  RCLCPP_INFO(rclcpp::get_logger("ROS2Visualizer"), "0topic_imu: %s, topic_odom: %s", topic_imu.c_str(), topic_odom.c_str());
+  if (!_node->has_parameter("topic_imu"))
+    _node->declare_parameter<std::string>("topic_imu", "/imu0");
   _node->get_parameter("topic_imu", topic_imu);
+  if (!_node->has_parameter("topic_odom"))
+    _node->declare_parameter<std::string>("topic_odom", "/ekf_odom/odom");
+  _node->get_parameter("topic_odom", topic_odom);
+  RCLCPP_INFO(rclcpp::get_logger("ROS2Visualizer"), "topic_imu: %s, topic_odom: %s", topic_imu.c_str(), topic_odom.c_str());
   parser->parse_external("relative_config_imu", "imu0", "rostopic", topic_imu);
-  sub_imu = _node->create_subscription<sensor_msgs::msg::Imu>(topic_imu, rclcpp::SensorDataQoS(),
-                                                              std::bind(&ROS2Visualizer::callback_inertial, this, std::placeholders::_1));
+  // sub_imu = _node->create_subscription<sensor_msgs::msg::Imu>(topic_imu, rclcpp::SensorDataQoS(),
+  //                                                             std::bind(&ROS2Visualizer::callback_inertial, this, std::placeholders::_1));
+  sub_imu.subscribe(_node, topic_imu, rclcpp::SensorDataQoS().get_rmw_qos_profile());
+  if (topic_odom.empty())
+    sub_imu.registerCallback([this](const sensor_msgs::msg::Imu::ConstSharedPtr &imu_msg) { callback_inertial(imu_msg, nullptr); });
+  else {
+    sub_odom.subscribe(_node, topic_odom, rclcpp::SensorDataQoS().get_rmw_qos_profile());
+    sync_imu_odom.connectInput(sub_imu, sub_odom);
+    sync_imu_odom.registerCallback(&ROS2Visualizer::callback_inertial, this);  // std::bind(&ROS2Visualizer::callback_inertial, this, std::placeholders::_1, std::placeholders::_2));
+  }
   PRINT_INFO("subscribing to IMU: %s\n", topic_imu.c_str());
 
   // Logic for sync stereo subscriber
@@ -179,9 +193,11 @@ void ROS2Visualizer::setup_subscribers(std::shared_ptr<ov_core::YamlParser> pars
   if (_app->get_params().state_options.num_cameras == 2) {
     // Read in the topics
     std::string cam_topic0, cam_topic1;
-    _node->declare_parameter<std::string>("topic_camera" + std::to_string(0), "/cam" + std::to_string(0) + "/image_raw");
+    if (!_node->has_parameter("topic_camera" + std::to_string(0)))
+      _node->declare_parameter<std::string>("topic_camera" + std::to_string(0), "/cam" + std::to_string(0) + "/image_raw");
     _node->get_parameter("topic_camera" + std::to_string(0), cam_topic0);
-    _node->declare_parameter<std::string>("topic_camera" + std::to_string(1), "/cam" + std::to_string(1) + "/image_raw");
+    if (!_node->has_parameter("topic_camera" + std::to_string(1)))
+      _node->declare_parameter<std::string>("topic_camera" + std::to_string(1), "/cam" + std::to_string(1) + "/image_raw");
     _node->get_parameter("topic_camera" + std::to_string(1), cam_topic1);
     parser->parse_external("relative_config_imucam", "cam" + std::to_string(0), "rostopic", cam_topic0);
     parser->parse_external("relative_config_imucam", "cam" + std::to_string(1), "rostopic", cam_topic1);
@@ -435,13 +451,19 @@ void ROS2Visualizer::visualize_final() {
   PRINT_INFO(REDPURPLE "TIME: %.3f seconds\n\n" RESET, (rT2 - rT1).total_microseconds() * 1e-6);
 }
 
-void ROS2Visualizer::callback_inertial(const sensor_msgs::msg::Imu::SharedPtr msg) {
+void ROS2Visualizer::callback_inertial(const sensor_msgs::msg::Imu::ConstSharedPtr &imu_msg, const nav_msgs::msg::Odometry::ConstSharedPtr &odom_msg) {
 
   // convert into correct format
   ov_core::ImuData message;
-  message.timestamp = msg->header.stamp.sec + msg->header.stamp.nanosec * 1e-9;
-  message.wm << msg->angular_velocity.x, msg->angular_velocity.y, msg->angular_velocity.z;
-  message.am << msg->linear_acceleration.x, msg->linear_acceleration.y, msg->linear_acceleration.z;
+  message.timestamp = imu_msg->header.stamp.sec + imu_msg->header.stamp.nanosec * 1e-9;
+  message.wm << imu_msg->angular_velocity.x, imu_msg->angular_velocity.y, imu_msg->angular_velocity.z;
+  message.am << imu_msg->linear_acceleration.x, imu_msg->linear_acceleration.y, imu_msg->linear_acceleration.z;
+  if (odom_msg) {
+    message.has_odom = true;
+    message.pm << odom_msg->pose.pose.position.x, odom_msg->pose.pose.position.y, odom_msg->pose.pose.position.z;
+    message.qm << odom_msg->pose.pose.orientation.x, odom_msg->pose.pose.orientation.y, odom_msg->pose.pose.orientation.z, odom_msg->pose.pose.orientation.w;
+    message.vm << odom_msg->twist.twist.linear.x, odom_msg->twist.twist.linear.y, odom_msg->twist.twist.linear.z;
+  }
 
   // send it to our VIO system
   _app->feed_measurement_imu(message);
